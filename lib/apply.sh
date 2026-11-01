@@ -20,9 +20,11 @@ apply_all() {
     #    cert_issue may stop nginx/xray for a standalone challenge; nginx_setup
     #    then rewrites the fallback vhost and brings nginx back up.
     if [[ " $needs " == *" cert "* ]]; then
-        cert_issue
+        cert_issue || die "cannot prepare certificates"
         # a self-signed fallback or another domain moves the certificate
-        py sync-cert >/dev/null || true
+        local cert_rc=0
+        py sync-cert >/dev/null || cert_rc=$?
+        [ "$cert_rc" = 0 ] || [ "$cert_rc" = 2 ] || die "cannot sync certificate paths"
         nginx_setup
     fi
 
@@ -53,6 +55,10 @@ apply_all() {
         mv "$XRAY_PENDING" "$XRAY_CONFIG"
         rm -f "$XRAY_PENDING.bak"
         chmod 600 "$XRAY_CONFIG"
+        if [ "$(state_get cert.fullchain)" = /etc/xray/certs/fullchain.pem ]; then
+            chgrp xraycert "$XRAY_CONFIG" && chmod 640 "$XRAY_CONFIG" \
+                || die "cannot grant Xray access to its config"
+        fi
         xray_restart
         if ! check_service xray; then
             warn "xray did not come up; rolling back to the previous config"

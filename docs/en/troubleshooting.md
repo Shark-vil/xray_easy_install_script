@@ -1,5 +1,14 @@
 # Troubleshooting
 
+## Let's Encrypt: permission denied
+
+Run `xvei apply` after updating xvei. For managed TLS inbounds, xvei copies
+the certificate and key to `/etc/xray/certs` (directory `750`, files `640`,
+owner `root:xraycert`) and grants Xray the supplementary group through systemd.
+Certbot's files and permissions stay unchanged. The renewal hook refreshes
+the copies before restarting services, including after `xvei remove`.
+Custom systemd restrictions such as `InaccessiblePaths` may need separate adjustment.
+
 ## Start here
 
 ```bash

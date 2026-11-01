@@ -28,8 +28,28 @@ cert_issue() {
             cert_selfsigned "$domain"
         fi
     fi
+    if [ "$(state_get cert.mode)" = letsencrypt ]; then
+        groupadd -f xraycert || die "cannot create xraycert group"
+        mkdir -p /etc/systemd/system/xray.service.d || die "cannot create Xray drop-in directory"
+        printf '[Service]\nSupplementaryGroups=xraycert\n' \
+            > /etc/systemd/system/xray.service.d/20-xvei-certificates.conf \
+            || die "cannot write Xray certificate drop-in"
+        systemctl daemon-reload || die "cannot reload systemd"
+        _cert_copy_xray "/etc/letsencrypt/live/$domain" || die "cannot copy Xray certificates"
+        py set-meta --cert-fullchain /etc/xray/certs/fullchain.pem \
+            --cert-privkey /etc/xray/certs/privkey.pem >/dev/null \
+            || die "cannot save Xray certificate paths"
+    fi
     _cert_install_deploy_hook "$domain"
-    command -v certbot >/dev/null 2>&1 && _cert_enable_renew_timer
+    if command -v certbot >/dev/null 2>&1; then _cert_enable_renew_timer; fi
+}
+
+# Keep Certbot's private directories untouched; only Xray gets group access.
+_cert_copy_xray() {
+    local src="$1" dst=/etc/xray/certs
+    install -d -m 750 -o root -g xraycert "$dst" &&
+        install -m 640 -o root -g xraycert "$src/fullchain.pem" "$dst/fullchain.pem" &&
+        install -m 640 -o root -g xraycert "$src/privkey.pem" "$dst/privkey.pem"
 }
 
 # Debian/Ubuntu's certbot enables its renewal timer itself; the Fedora/EPEL
@@ -107,16 +127,23 @@ EOF
 cert_hook_standalone() {
     local old="/etc/letsencrypt/renewal-hooks/deploy/xvei-restart.sh"
     [ -e "$old" ] || return 0
-    local hy2=""
+    local hy2="" xray=""
+    if [ "$(state_get cert.mode)" = letsencrypt ]; then
+        xray="$(declare -f _cert_copy_xray)
+src=$(printf '%q' "/etc/letsencrypt/live/$(state_get domain)")
+[ -z \"\${RENEWED_LINEAGE:-}\" ] || [ \"\$RENEWED_LINEAGE\" = \"\$src\" ] || exit 0
+_cert_copy_xray \"\$src\" || exit 1"
+    fi
     if [ -f "$HY2_CONFIG" ] && [ "$(state_get cert.mode)" = "letsencrypt" ]; then
         hy2="install -m 644 \"$(state_get cert.fullchain)\" $HY2_DIR/cert.crt
 install -m 640 \"$(state_get cert.privkey)\" $HY2_DIR/cert.key
 chgrp hysteria $HY2_DIR/cert.key 2>/dev/null || chmod 644 $HY2_DIR/cert.key"
     fi
     cat > /etc/letsencrypt/renewal-hooks/deploy/restart-xray.sh <<EOF
-#!/bin/sh
+#!/bin/bash
 # Left by xvei on uninstall: after a Let's Encrypt renewal, restart the
 # services that hold the certificate open.
+$xray
 $hy2
 systemctl restart xray.service 2>/dev/null || true
 systemctl is-active --quiet nginx && systemctl restart nginx.service
@@ -144,6 +171,11 @@ cert_hook_teardown() {
 
 # called by certbot after a successful renewal (see xvei.sh `_renew-hook`)
 cert_renew_hook_run() {
+    if [ "$(state_get cert.mode)" = letsencrypt ]; then
+        local src="/etc/letsencrypt/live/$(state_get domain)"
+        [ -z "${RENEWED_LINEAGE:-}" ] || [ "$RENEWED_LINEAGE" = "$src" ] || return 0
+        _cert_copy_xray "$src" || return 1
+    fi
     log "Let's Encrypt certificate renewed - restarting services"
     if command -v hysteria >/dev/null 2>&1 && [ -f "$HY2_CONFIG" ]; then
         hy2_sync_cert
